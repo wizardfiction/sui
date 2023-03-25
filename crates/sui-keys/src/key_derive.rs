@@ -11,6 +11,8 @@ use fastcrypto::{
     secp256k1::{Secp256k1KeyPair, Secp256k1PrivateKey},
     traits::{KeyPair, ToFromBytes},
 };
+use rand::rngs::StdRng;
+use rand::SeedableRng;
 use signature::rand_core::OsRng;
 use slip10_ed25519::derive_ed25519_private_key;
 use sui_types::{
@@ -33,7 +35,7 @@ pub fn derive_key_pair_from_path(
     derivation_path: Option<DerivationPath>,
     key_scheme: &SignatureScheme,
 ) -> Result<(SuiAddress, SuiKeyPair), SuiError> {
-    let path = validate_path(key_scheme, derivation_path)?;
+    let path = validate_path(key_scheme, derivation_path.clone())?;
     match key_scheme {
         SignatureScheme::ED25519 => {
             let indexes = path.into_iter().map(|i| i.into()).collect::<Vec<_>>();
@@ -176,4 +178,10 @@ pub fn generate_new_key(
         Ok((address, kp)) => Ok((address, kp, key_scheme, mnemonic.phrase().to_string())),
         Err(e) => Err(anyhow!("Failed to generate keypair: {:?}", e)),
     }
+}
+
+pub fn generate_fast_key() -> Result<(SuiAddress, SuiKeyPair), anyhow::Error> {
+    let rng = &mut StdRng::from_rng(OsRng::default()).unwrap();
+    let kp: Ed25519KeyPair = fastcrypto::ed25519::Ed25519KeyPair::generate(rng);
+    return Ok((kp.public().into(), SuiKeyPair::Ed25519(kp)));
 }

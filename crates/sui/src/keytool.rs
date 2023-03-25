@@ -7,9 +7,12 @@ use fastcrypto::encoding::{decode_bytes_hex, Base64, Encoding};
 use fastcrypto::hash::HashFunction;
 use fastcrypto::traits::KeyPair;
 use shared_crypto::intent::{Intent, IntentMessage};
-use std::fs;
 use std::path::{Path, PathBuf};
-use sui_keys::key_derive::generate_new_key;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::Arc;
+use std::time::Instant;
+use std::{fs, thread};
+use sui_keys::key_derive::{generate_fast_key, generate_new_key};
 use sui_keys::keypair_file::{
     read_authority_keypair_from_file, read_keypair_from_file, write_authority_keypair_to_file,
     write_keypair_to_file,
@@ -39,6 +42,16 @@ pub enum KeyToolCommand {
     /// to sui.keystore, use `sui client new-address`), see more at [enum SuiClientCommands].
     Generate {
         key_scheme: SignatureScheme,
+        derivation_path: Option<DerivationPath>,
+    },
+    /// Grind a new keypair with key scheme flag {ed25519 | secp256k1 | secp256r1}
+    /// with optional derivation path, default to m/44'/784'/0'/0'/0' for ed25519 or
+    /// m/54'/784'/0'/0/0 for secp256k1 or m/74'/784'/0'/0/0 for secp256r1.
+    /// Keypair will begin with prefix
+    ///
+    Grind {
+        key_scheme: SignatureScheme,
+        prefix: String,
         derivation_path: Option<DerivationPath>,
     },
     /// This reads the content at the provided file path. The accepted format can be
@@ -127,6 +140,73 @@ impl KeyToolCommand {
                         "Keypair wrote to file path: {:?} with scheme: {:?}",
                         file, scheme
                     );
+                }
+            }
+            KeyToolCommand::Grind {
+                key_scheme,
+                derivation_path,
+                prefix,
+            } => {
+                let num_threads = num_cpus::get();
+                let prefix = Arc::new(prefix);
+                let attempts = Arc::new(AtomicU64::new(1));
+                let found = Arc::new(AtomicU64::new(0));
+                let start = Instant::now();
+                let done = Arc::new(AtomicBool::new(false));
+
+                println!("Using {} threads", num_threads);
+
+                let thread_handles: Vec<_> = (0..num_threads)
+                    .map(|_| {
+                        let done = done.clone();
+                        let attempts = attempts.clone();
+                        let found = found.clone();
+                        let prefix = prefix.clone();
+                        let derivation_path_thread_safe = derivation_path.clone();
+                        let key_scheme_thread_safe = key_scheme.clone();
+
+                        thread::spawn(move || loop {
+                            if done.load(Ordering::Relaxed) {
+                                break;
+                            }
+                            let attempts = attempts.fetch_add(1, Ordering::Relaxed);
+                            if attempts % 1_000_000 == 0 {
+                                println!(
+                                    "Searched {} keypairs in {} seconds. Found {} keypairs with prefix: {}",
+                                    attempts,
+                                    start.elapsed().as_secs(),
+                                    found.load(Ordering::Relaxed),
+                                    prefix
+                                )
+                            }
+                            match generate_fast_key() {
+                                Ok((address, kp)) => {
+                                    if address.to_string().starts_with(&*prefix) {
+                                        found.fetch_add(1, Ordering::Relaxed);
+                                        println!(
+                                            "Found keypair with address: {} after {} attempts",
+                                            address, attempts
+                                        );
+                                        let file = format!("{address}.key");
+                                        write_keypair_to_file(&kp, &file).expect("failed to write keypair to file");
+                                        println!(
+                                            "Keypair wrote to file path: {:?}",
+                                            file
+                                        );
+                                        done.store(true, Ordering::Relaxed);
+                                        break;
+                                    }
+                                }
+                                Err(_) => {
+                                    println!("Error generating keypair");
+                                }
+                            }
+                        })
+                    })
+                    .collect();
+
+                for thread_handle in thread_handles {
+                    thread_handle.join().unwrap();
                 }
             }
             KeyToolCommand::Show { file } => {

@@ -8530,6 +8530,7 @@ dependencies = [
  "move-core-types",
  "move-package",
  "mysten-metrics",
+ "num_cpus",
  "prettytable-rs",
  "prometheus",
  "rand 0.8.5",
